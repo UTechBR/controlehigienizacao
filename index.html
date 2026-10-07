@@ -36,6 +36,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
 .st.ok{border-left-color:var(--ok)}.st.ok .v{color:var(--ok)}
 .st.warn{border-left-color:var(--warn)}.st.warn .v{color:var(--warn)}
 .st.pri{border-left-color:var(--pri)}.st.pri .v{color:var(--pri)}
+.st.bad{border-left-color:var(--bad)}.st.bad .v{color:var(--bad)}
 label{font-size:12px;color:var(--mut);display:block;margin-bottom:3px;font-weight:500}
 select,input[type=number]{font:inherit;font-size:13px;padding:7px 9px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--tx);min-width:150px}
 .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:10px 0}
@@ -168,6 +169,19 @@ footer b{color:var(--tx)}
       <select id="fmt"><option value="xlsx">.xlsx</option><option value="csv" selected>.csv (separado por ;)</option></select>
     </div>
     <div class="file" id="uniInfo">A planilha unificada do dia estará disponível após a etapa 1.</div>
+  </div>
+
+  <!-- Elegibilidade CLT -->
+  <div class="card">
+    <h2>Elegibilidade por Banco (CLT)</h2>
+    <p class="hint">Analisa a planilha que você acabou de subir no Passo 2 (não a base histórica) — idade, tempo de vínculo, tempo/porte do CNPJ, situação cadastral e FGTS — para ver se o CPF teria chance em pelo menos um dos bancos: Petra (UY3), Facta, Soma, BMG, Presença Bank e VCTex. <b>Não avalia margem consignável, PEP, CPF regular nem CBO/profissão vedada</b> — a planilha não traz essas colunas, então um CPF marcado como "sem banco compatível" pode ainda ser reprovado por esses outros motivos, e um aprovado aqui não está garantido.</p>
+    <div class="stats" id="cltStats"></div>
+    <div class="row">
+      <button id="btnMDV" disabled>Exportar para Loja MDV (qualquer banco)</button>
+      <button id="btnHelp" disabled>Exportar para Lojas Help (somente BMG)</button>
+      <button id="btnCLT" disabled>Exportar CPFs Sem Banco Compatível</button>
+    </div>
+    <div class="file" id="cltInfo"></div>
   </div>
 
   <!-- Histórico de bases -->
@@ -320,6 +334,158 @@ async function commitUY3(map){
   for(let i=0;i<list.length;i+=20000)await putMany('uy3',list.slice(i,i+20000));
   return list.length;
 }
+
+/* ---------- Elegibilidade CLT (bancos) ----------
+   Checa só os critérios possíveis com as colunas da planilha pós-higienização
+   do Nova Vida (idade, tempo de vínculo, tempo/porte de CNPJ, situação
+   cadastral, FGTS). NÃO avalia margem consignável, PEP, CPF regular nem
+   CBO/profissão vedada — a planilha não traz esses dados. */
+function clFind(head,re){return head.findIndex(h=>re.test(noAcc(String(h||'')).toUpperCase()));}
+function clIdx(head){
+  return {
+    idade:clFind(head,/^IDADE$/),
+    sexo:clFind(head,/^SEXO$/),
+    vinculo:clFind(head,/TEMPO_MEDIO_EMPREGATICIO/),
+    abertura:clFind(head,/^DATA_ABERTURA$/),
+    func:clFind(head,/QTDE_FUNCIONARIOS/),
+    porte:clFind(head,/^PORTE$/),
+    fatur:clFind(head,/FATURAMENTO_PRESUMIDO/),
+    situacao:clFind(head,/SITUACAO_CADASTRAL_PJ/),
+    fgts:clFind(head,/FLAG_DAU_FGTS_INSS/),
+    nome:clFind(head,/^NOME$/)
+  };
+}
+function clNum(v){
+  if(v==null||v==='')return null;
+  const n=parseFloat(String(v).replace(/\./g,'').replace(',','.').replace(/[^\d.\-]/g,''));
+  return isFinite(n)?n:null;
+}
+function clVinculoMeses(v){
+  if(v==null||v==='')return null;
+  const s=String(v);
+  const m=s.match(/(\d+)\s*A\s*(\d+)/i)||s.match(/(\d+)/);
+  return m?parseInt(m[1],10):null;
+}
+function clCnpjAnos(v){
+  if(v==null||v==='')return null;
+  const m=String(v).match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if(!m)return null;
+  const d=new Date(+m[3],+m[2]-1,+m[1]);
+  if(isNaN(d))return null;
+  return (Date.now()-d.getTime())/(365.25*24*3600*1000);
+}
+function clData(idx,row){
+  return {
+    idade:idx.idade>=0?clNum(row[idx.idade]):null,
+    sexo:idx.sexo>=0?String(row[idx.sexo]||'').trim().toUpperCase():'',
+    vincMeses:idx.vinculo>=0?clVinculoMeses(row[idx.vinculo]):null,
+    cnpjAnos:idx.abertura>=0?clCnpjAnos(row[idx.abertura]):null,
+    func:idx.func>=0?clNum(row[idx.func]):null,
+    porte:idx.porte>=0?String(row[idx.porte]||'').trim().toUpperCase():'',
+    fatur:idx.fatur>=0?clNum(row[idx.fatur]):null,
+    situacao:idx.situacao>=0?noAcc(String(row[idx.situacao]||'')).trim().toUpperCase():'',
+    fgtsPend:idx.fgts>=0?/^S/i.test(String(row[idx.fgts]||'').trim()):false
+  };
+}
+function rIdade(d,min,max){if(d.idade==null)return null;return(d.idade<min||d.idade>max)?`idade ${d.idade} fora da faixa ${min}-${max}`:null}
+function rIdadeSexo(d,fx){if(d.idade==null)return null;const r=fx[d.sexo];if(!r)return null;return(d.idade<r[0]||d.idade>r[1])?`idade ${d.idade} fora da faixa ${r[0]}-${r[1]} (${d.sexo})`:null}
+function rVinculo(d,min){if(d.vincMeses==null)return null;return d.vincMeses<min?`vínculo ~${d.vincMeses}m abaixo do mínimo de ${min}m`:null}
+function rCnpjAnos(d,min){if(d.cnpjAnos==null)return null;return d.cnpjAnos<min?`CNPJ com ~${d.cnpjAnos.toFixed(1)} anos, abaixo do mínimo de ${min}`:null}
+function rFunc(d,min){if(d.func==null)return null;return d.func<min?`empresa com ${d.func} funcionário(s), abaixo do mínimo de ${min}`:null}
+function rSituacao(d){if(!d.situacao)return null;return d.situacao!=='ATIVA'?`situação cadastral da empresa "${d.situacao}" (precisa ATIVA)`:null}
+function rFgts(d){return d.fgtsPend?'empresa com pendência de FGTS':null}
+function rPorteBloq(d,codes,label){if(!d.porte)return null;return codes.includes(d.porte)?`empresa porte ${d.porte} não aceito (${label})`:null}
+const BANCOS_CLT=[
+ {nome:'Petra (UY3)',check(d){const m=[];
+   [rIdade(d,21,61),rVinculo(d,12),rCnpjAnos(d,3),rPorteBloq(d,['MEI'],'precisa ser diferente de MEI'),rFgts(d),rSituacao(d)].forEach(x=>x&&m.push(x));
+   if(d.func!=null&&d.fatur!=null&&d.func<50&&d.fatur<5000000)m.push(`empresa com ${d.func} funcionário(s) e faturamento abaixo de R$5mi (precisa 50 func. OU R$5mi fat. anual)`);
+   return m}},
+ {nome:'Facta',check(d){const m=[];
+   [rIdadeSexo(d,{M:[21,62],F:[21,57]}),rVinculo(d,10),rCnpjAnos(d,5)].forEach(x=>x&&m.push(x));
+   return m}},
+ {nome:'Soma',check(d){const m=[];
+   [rIdade(d,18,64),rVinculo(d,9),rCnpjAnos(d,2),rFunc(d,20)].forEach(x=>x&&m.push(x));
+   return m}},
+ {nome:'BMG',check(d){const m=[];
+   [rIdade(d,18,70),rVinculo(d,12),rCnpjAnos(d,2)].forEach(x=>x&&m.push(x));
+   return m}},
+ {nome:'Presença Bank',check(d){const m=[];
+   [rIdade(d,20,62),rVinculo(d,12),rCnpjAnos(d,2),rPorteBloq(d,['ME'],'não pode ser ME'),rFgts(d)].forEach(x=>x&&m.push(x));
+   return m}},
+ {nome:'VCTex',check(d){const m=[];
+   [rIdadeSexo(d,{M:[21,60],F:[21,54]}),rVinculo(d,12),rCnpjAnos(d,2),rFunc(d,20)].forEach(x=>x&&m.push(x));
+   return m}}
+];
+function avaliarBancos(idx,row){
+  const d=clData(idx,row);
+  const reprovas={};const bancosOk=[];
+  BANCOS_CLT.forEach(b=>{const motivos=b.check(d);if(motivos.length)reprovas[b.nome]=motivos;else bancosOk.push(b.nome)});
+  const temDados=d.idade!=null||d.vincMeses!=null||d.cnpjAnos!=null;
+  return {aprovou:bancosOk.length,reprovas,temDados,bancosOk};
+}
+// Analisa a planilha que acabou de ser subida no Passo 2 (não a base histórica).
+// Mapa cpf -> {nome,bancosOk,reprovas,temDados}, usado tanto pelos cards de estatística/exportação
+// quanto para anotar a coluna "BANCOS COMPATÍVEIS" na Planilha Unificada (Modelo UY3).
+function cltMap(){
+  if(!R)return null;
+  const idx=clIdx(R.head);
+  if(idx.idade<0&&idx.vinculo<0&&idx.abertura<0)return null;
+  const ci=R.nv?R.nv.cpf:selManual().ci;
+  if(ci<0)return null;
+  const m=new Map();
+  for(const row of R.data){
+    const c=normCPF(row[ci]);if(!c||m.has(c))continue;
+    const nome=idx.nome>=0?(row[idx.nome]||''):'';
+    const {reprovas,temDados,bancosOk}=avaliarBancos(idx,row);
+    m.set(c,{nome,bancosOk,reprovas,temDados});
+  }
+  return m;
+}
+function cltReport(){
+  if(!R)return null;
+  const m=cltMap();
+  if(!m)return {semColunas:true};
+  let semDados=0,aprovadosAlgum=0;const reprovados=[],aprovados=[];
+  m.forEach((info,c)=>{
+    if(!info.temDados){semDados++;return}
+    if(info.bancosOk.length){aprovadosAlgum++;aprovados.push({cpf:c,nome:info.nome,bancosOk:info.bancosOk});return}
+    const motivo=Object.entries(info.reprovas).map(([b,ms])=>b+': '+ms.join('; ')).join(' | ');
+    reprovados.push({cpf:c,nome:info.nome,motivo});
+  });
+  return {total:m.size,semDados,aprovadosAlgum,reprovados,aprovados};
+}
+let CLT=null;
+async function atualizarCLT(){
+  CLT=cltReport();
+  const r=CLT;
+  if(!r||r.semColunas){$('cltStats').innerHTML='';$('cltInfo').textContent='A planilha do Passo 2 ainda não trouxe as colunas necessárias (IDADE, TEMPO_MEDIO_EMPREGATICIO, DATA_ABERTURA etc.) para essa análise.';$('btnCLT').disabled=true;$('btnMDV').disabled=true;$('btnHelp').disabled=true;return}
+  $('cltStats').innerHTML=
+   `<div class="st pri"><div class="v">${num(r.total)}</div><div class="l">CPFs na Planilha do Dia</div></div>`+
+   `<div class="st ok"><div class="v">${num(r.aprovadosAlgum)}</div><div class="l">Compatível com ≥1 Banco</div></div>`+
+   `<div class="st bad"><div class="v">${num(r.reprovados.length)}</div><div class="l">Sem Banco Compatível</div></div>`+
+   `<div class="st warn"><div class="v">${num(r.semDados)}</div><div class="l">Sem Dados Suficientes</div></div>`;
+  $('btnCLT').disabled=!r.reprovados.length;
+  $('btnMDV').disabled=!r.aprovadosAlgum;
+  $('btnHelp').disabled=!r.aprovados.some(x=>x.bancosOk.includes('BMG'));
+  $('cltInfo').textContent='Critérios checados: idade, tempo de vínculo, tempo/porte do CNPJ, situação cadastral e FGTS. Margem consignável, PEP, CPF regular e CBO não são verificados.';
+}
+$('btnCLT').onclick=()=>{
+  const r=CLT;
+  if(!r||!r.reprovados.length)return;
+  download(['CPF','NOME','MOTIVO (por banco)'],r.reprovados.map(x=>['="'+x.cpf+'"',x.nome,x.motivo]),'sem_banco_compativel_'+hoje(),'csv');
+};
+$('btnMDV').onclick=()=>{
+  const r=CLT;
+  if(!r||!r.aprovadosAlgum)return;
+  download(['CPF','NOME','BANCOS COMPATÍVEIS'],r.aprovados.map(x=>['="'+x.cpf+'"',x.nome,x.bancosOk.join(', ')]),'loja_mdv_'+hoje(),'csv');
+};
+$('btnHelp').onclick=()=>{
+  const r=CLT;
+  if(!r)return;
+  const list=r.aprovados.filter(x=>x.bancosOk.includes('BMG'));
+  if(!list.length)return;
+  download(['CPF','NOME'],list.map(x=>['="'+x.cpf+'"',x.nome]),'loja_help_bmg_'+hoje(),'csv');
+};
 
 /* ---------- Preço ---------- */
 const LIM=[300000,500000,1000000,Infinity];
@@ -615,10 +781,10 @@ setupDrop('drop2','file2',async f=>{
     const gh=guess(R.head,/hot/i);
     fillSel($('telCol2'),R.head,gh>=0?gh:guess(R.head,/(celular|telefone|fone|tel)/i),true);
     fillSel($('wppCol2'),R.head,guess(R.head,/(whats|wpp|zap)/i),true);
-    prever2.last=null;await prever2();
+    prever2.last=null;await prever2();await atualizarCLT();
   }catch(e){$('drop2').innerHTML='<b style="color:var(--bad)">Erro:</b> '+esc(e.message)}
 });
-['cpfCol2','telCol2','wppCol2'].forEach(i=>$(i).onchange=()=>prever2());
+['cpfCol2','telCol2','wppCol2'].forEach(i=>$(i).onchange=()=>{prever2();atualizarCLT()});
 $('chkMiss').onchange=()=>prever2();
 const selManual=()=>({ci:+$('cpfCol2').value,ti:+$('telCol2').value,wi:+$('wppCol2').value});
 
@@ -657,7 +823,7 @@ $('btnMerge').onclick=async()=>{
   mesN+=out.size+miss;await kvSet(mesKey(),mesN);renderFaixa();
   await loadHist();queueSave({hist:true,nv:true,config:true});
   $('s2msg').innerHTML=`<div class="msg ok">Base atualizada: ${num(list.length)} CPFs registrados${miss?` (${num(miss)} sem retorno)`:''}. Total na base: ${num(H.size)}.</div>`;
-  await atualizarUni();
+  await atualizarUni();await atualizarCLT();
   $('btnUniUY3').click();
 };
 
@@ -697,14 +863,22 @@ async function buildUnified(l,onlyWpp){
   }
   return {head,rows,pend};
 }
+function bancosTexto(info){
+  if(!info||!info.temDados)return '';
+  return info.bancosOk.length?info.bancosOk.join(', '):'Nenhum banco compatível';
+}
 async function buildUY3(l){
   const {head,rows}=await buildUnified(l,true);
   const iTel=head.indexOf('TELEFONE HOT'),iWpp=head.indexOf('WHATSAPP');
   const idx=detectUY3(l.head);
+  const cm=cltMap();
   let faltouStore=0;
-  const outHead=['NOME','CPF','DATA NASCIMENTO','MATRÍCULA','PRAZO','PARCELA','VALOR LIBERADO','VÁLIDO ATÉ','TELEFONE HOT','POSSUI WHATSAPP'];
-  const outRows=rows.map(r=>{
+  const outHead=['NOME','CPF','DATA NASCIMENTO','MATRÍCULA','PRAZO','PARCELA','VALOR LIBERADO','VÁLIDO ATÉ','TELEFONE HOT','POSSUI WHATSAPP','PROVÁVEIS BANCOS COMPATÍVEIS'];
+  const outRows=[];let semBanco=0;
+  for(const r of rows){
     const c=normCPF(r[l.cpfIdx]);
+    const bancos=c&&cm?bancosTexto(cm.get(c)):'';
+    if(bancos==='Nenhum banco compatível'){semBanco++;continue}
     const u=c?UY3.get(c):null;
     const nome=(idx.nome>=0&&r[idx.nome])?r[idx.nome]:(u?u.nome:'');
     const nasc=(idx.nasc>=0&&r[idx.nasc])?fmtDateVal(r[idx.nasc]):(u?u.nasc:'');
@@ -714,16 +888,19 @@ async function buildUY3(l){
     const valor=(idx.valor>=0&&r[idx.valor])?r[idx.valor]:(u?u.valor:'');
     const validoAte=(idx.validoAte>=0&&r[idx.validoAte])?fmtDateVal(r[idx.validoAte]):(u?u.validoAte:'');
     if(!mat&&!prazo&&!parcela&&!valor)faltouStore++;
-    return [nome,'="'+r[l.cpfIdx]+'"',nasc,mat,prazo,parcela,valor,validoAte,iTel>=0?r[iTel]:'',iWpp>=0?(isWhats(r[iWpp])?'SIM':'NÃO'):''];
-  });
+    outRows.push([nome,'="'+r[l.cpfIdx]+'"',nasc,mat,prazo,parcela,valor,validoAte,iTel>=0?r[iTel]:'',iWpp>=0?(isWhats(r[iWpp])?'SIM':'NÃO'):'',bancos]);
+  }
   const naoAchou=faltouStore?['MATRÍCULA/PRAZO/PARCELA/VALOR de '+faltouStore+' CPF(s) (nem na planilha do dia, nem numa base UY3 importada antes)']:[];
-  return {head:outHead,rows:outRows,naoAchou};
+  return {head:outHead,rows:outRows,naoAchou,semBanco};
 }
 $('btnUniUY3').onclick=async()=>{
   const l=await loteAtual();if(!l)return;
-  const {head,rows,naoAchou}=await buildUY3(l);
+  const {head,rows,naoAchou,semBanco}=await buildUY3(l);
   download(head,rows,'unificada_uy3_'+hoje(),'csv');
-  $('uniInfo').textContent=naoAchou.length?('Não encontrei na planilha de origem a(s) coluna(s): '+naoAchou.join(', ')+'. Elas saíram em branco no modelo UY3 — confere o nome exato dessas colunas na sua base.'):'';
+  const msgs=[];
+  if(naoAchou.length)msgs.push('Não encontrei na planilha de origem a(s) coluna(s): '+naoAchou.join(', ')+'. Elas saíram em branco no modelo UY3 — confere o nome exato dessas colunas na sua base.');
+  if(semBanco)msgs.push(num(semBanco)+' CPF(s) sem banco compatível foram removidos desta planilha.');
+  $('uniInfo').textContent=msgs.join(' ');
 };
 $('btnAll').onclick=async()=>{
   if(!H.size)return;
@@ -974,7 +1151,7 @@ $('btnZeroEco').onclick=async()=>{
     mesN=(await kvGet(mesKey()))||0;renderFaixa();
     ecoZeroAt=(await kvGet('ecoZeroAt'))||0;
     LOG=(await kvGet('log'))||[];renderLog();
-    await loadHist();await loadUY3();await initDir();await atualizarUni();
+    await loadHist();await loadUY3();await initDir();await atualizarUni();await atualizarCLT();
   }catch(e){
     document.querySelector('.wrap').insertAdjacentHTML('afterbegin','<div class="msg bad">O armazenamento local está bloqueado neste navegador, impedindo o salvamento da base. Abra o arquivo diretamente no Chrome ou Edge.</div>');
   }
