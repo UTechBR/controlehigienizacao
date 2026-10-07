@@ -131,8 +131,11 @@ footer b{color:var(--tx)}
       <label class="chk"><input type="checkbox" id="onlyCpf" checked><span>Exportar apenas a coluna de CPF (arquivo reduzido para envio ao Nova Vida)</span></label>
       <div class="row">
         <button class="pri" id="btnNovos">Exportar Novos Registros</button>
+        <button id="btnNovosCpf" disabled>Exportar Modelo CPF</button>
+        <button id="btnNovosCnpj" disabled>Exportar Modelo CPF + CNPJ</button>
         <small id="s1note"></small>
       </div>
+      <div class="file" id="s1cnpjInfo"></div>
     </div>
   </div>
 
@@ -708,7 +711,8 @@ async function analisar(){
     if(H.has(c)){ja++;return}
     novos.push(row);cpfsNovos.add(c);
   });
-  plan={novos,cpfsNovos,ci,vi,invalid,dupFile,ja};
+  const giCnpj=guess(L.head,/cnpj/i);
+  plan={novos,cpfsNovos,ci,vi,invalid,dupFile,ja,giCnpj};
   const p0=preco(0),pn=preco(novos.length);
   $('s1stats').innerHTML=
    `<div class="st"><div class="v">${num(L.data.length)}</div><div class="l">Linhas na Planilha</div></div>`+
@@ -719,19 +723,35 @@ async function analisar(){
    `<div class="st ok"><div class="v">${brl((ja+dupFile)*p0)}</div><div class="l">Economia Estimada</div></div>`+
    `<div class="st pri"><div class="v">${brl(novos.length*pn)}</div><div class="l">Custo Estimado</div></div>`;
   $('btnNovos').disabled=!novos.length;
+  $('btnNovosCpf').disabled=!novos.length;
+  $('btnNovosCnpj').disabled=!novos.length||giCnpj<0;
+  $('s1cnpjInfo').textContent=(novos.length&&giCnpj<0)?'Coluna de CNPJ não encontrada nesta planilha — o botão "CPF + CNPJ" fica desabilitado.':'';
   $('s1note').textContent=novos.length?'':'Nenhum registro novo para consulta hoje.';
   Object.assign(LG,{linhas:L.data.length,dup:dupFile,invalid,ja,novos:novos.length,econJa:ja*p0,econDup:dupFile*p0,custo:novos.length*pn});
   await upsertLog(LG);renderLog();
   await atualizarUni();
 }
 
-$('btnNovos').onclick=async()=>{
-  if(!plan||!plan.novos.length)return;
+async function marcarEnviado(){
   await kvSet('lote',{name:L.name,head:L.head,data:L.data,cpfIdx:plan.ci,valIdx:plan.vi,pendentes:[...plan.cpfsNovos],logId:LG.id});
-  if($('onlyCpf').checked)download(['CPF'],plan.novos.map(r=>[normCPF(r[plan.ci])]),'novos_cpf_'+hoje());
-  else download(L.head,plan.novos,'novos_para_higienizar_'+hoje());
   LG.enviado=true;await upsertLog(LG);
   await atualizarUni();
+}
+$('btnNovos').onclick=async()=>{
+  if(!plan||!plan.novos.length)return;
+  await marcarEnviado();
+  if($('onlyCpf').checked)download(['CPF'],plan.novos.map(r=>[normCPF(r[plan.ci])]),'novos_cpf_'+hoje());
+  else download(L.head,plan.novos,'novos_para_higienizar_'+hoje());
+};
+$('btnNovosCpf').onclick=async()=>{
+  if(!plan||!plan.novos.length)return;
+  await marcarEnviado();
+  download(['CPF'],plan.novos.map(r=>[normCPF(r[plan.ci])]),'novos_cpf_'+hoje());
+};
+$('btnNovosCnpj').onclick=async()=>{
+  if(!plan||!plan.novos.length||plan.giCnpj<0)return;
+  await marcarEnviado();
+  download(['CPF','CNPJ'],plan.novos.map(r=>[normCPF(r[plan.ci]),r[plan.giCnpj]??'']),'novos_cpf_cnpj_'+hoje());
 };
 
 /* ---------- Entradas a partir de um retorno ---------- */
