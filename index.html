@@ -353,7 +353,9 @@ function clIdx(head){
     func:clFind(head,/QTDE_FUNCIONARIOS/),
     porte:clFind(head,/^PORTE$/),
     fatur:clFind(head,/FATURAMENTO_PRESUMIDO/),
+    capitalSocial:clFind(head,/CAPITAL_SOCIAL/),
     situacao:clFind(head,/SITUACAO_CADASTRAL_PJ/),
+    situacaoEspecial:clFind(head,/SITUACAO_ESPECIAL/),
     fgts:clFind(head,/FLAG_DAU_FGTS_INSS/),
     nome:clFind(head,/^NOME$/)
   };
@@ -386,7 +388,9 @@ function clData(idx,row){
     func:idx.func>=0?clNum(row[idx.func]):null,
     porte:idx.porte>=0?String(row[idx.porte]||'').trim().toUpperCase():'',
     fatur:idx.fatur>=0?clNum(row[idx.fatur]):null,
+    capitalSocial:idx.capitalSocial>=0?clNum(row[idx.capitalSocial]):null,
     situacao:idx.situacao>=0?noAcc(String(row[idx.situacao]||'')).trim().toUpperCase():'',
+    situacaoEspecial:idx.situacaoEspecial>=0?noAcc(String(row[idx.situacaoEspecial]||'')).trim().toUpperCase():'',
     fgtsPend:idx.fgts>=0?/^S/i.test(String(row[idx.fgts]||'').trim()):false
   };
 }
@@ -398,10 +402,23 @@ function rFunc(d,min){if(d.func==null)return null;return d.func<min?`empresa com
 function rSituacao(d){if(!d.situacao)return null;return d.situacao!=='ATIVA'?`situação cadastral da empresa "${d.situacao}" (precisa ATIVA)`:null}
 function rFgts(d){return d.fgtsPend?'empresa com pendência de FGTS':null}
 function rPorteBloq(d,codes,label){if(!d.porte)return null;return codes.includes(d.porte)?`empresa porte ${d.porte} não aceito (${label})`:null}
+function rFalencia(d){if(!d.situacaoEspecial)return null;return /FALENC|RECUPERACAO JUDICIAL/.test(d.situacaoEspecial)?`empresa com situação especial "${d.situacaoEspecial}" (falência/recuperação judicial não aceito)`:null}
+function rPorteMinimo(d){
+  const criterios=[];
+  if(d.func!=null)criterios.push(d.func>=50);
+  if(d.fatur!=null)criterios.push(d.fatur>=5000000);
+  if(d.capitalSocial!=null)criterios.push(d.capitalSocial>=1000000);
+  if(!criterios.length)return null;
+  if(criterios.some(Boolean))return null;
+  const partes=[];
+  if(d.func!=null)partes.push(d.func+' funcionário(s)');
+  if(d.fatur!=null)partes.push('faturamento abaixo de R$5mi');
+  if(d.capitalSocial!=null)partes.push('capital social abaixo de R$1mi');
+  return `empresa com ${partes.join(', ')} (precisa 50 func. OU R$5mi fat. anual OU R$1mi capital social)`;
+}
 const BANCOS_CLT=[
  {nome:'Petra (UY3)',check(d){const m=[];
-   [rIdade(d,21,61),rVinculo(d,12),rCnpjAnos(d,3),rPorteBloq(d,['MEI'],'precisa ser diferente de MEI'),rFgts(d),rSituacao(d)].forEach(x=>x&&m.push(x));
-   if(d.func!=null&&d.fatur!=null&&d.func<50&&d.fatur<5000000)m.push(`empresa com ${d.func} funcionário(s) e faturamento abaixo de R$5mi (precisa 50 func. OU R$5mi fat. anual)`);
+   [rIdade(d,21,61),rVinculo(d,12),rCnpjAnos(d,3),rFgts(d),rSituacao(d),rFalencia(d),rPorteMinimo(d)].forEach(x=>x&&m.push(x));
    return m}},
  {nome:'Facta',check(d){const m=[];
    [rIdadeSexo(d,{M:[21,62],F:[21,57]}),rVinculo(d,10),rCnpjAnos(d,5)].forEach(x=>x&&m.push(x));
